@@ -16,7 +16,7 @@ def extract_qa_with_ai(full_text):
     into a perfect list of questions and solutions.
     """
     # We use the 'flash' model because it is incredibly fast and cost-effective
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash')
     
     # This is our specific instruction to the AI
     prompt = f"""
