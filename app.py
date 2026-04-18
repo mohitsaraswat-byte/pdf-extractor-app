@@ -1,122 +1,100 @@
 import streamlit as st
 import pdfplumber
-import re
+import google.generativeai as genai
+import json
 
-def extract_qa_from_text(full_text):
+# --- 1. CONFIGURE THE AI API ---
+# Streamlit safely grabs your secret key from the settings we just configured
+try:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+except KeyError:
+    st.error("API Key not found! Please add GEMINI_API_KEY to your Streamlit Secrets.")
+
+def extract_qa_with_ai(full_text):
     """
-    Splits an exam paper into questions and solutions using various possible headings.
-    It automatically detects how many questions there are.
+    Sends the messy PDF text to the Gemini API and asks it to organize it 
+    into a perfect list of questions and solutions.
     """
-    extracted_data = []
+    # We use the 'flash' model because it is incredibly fast and cost-effective
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
-    # Step 1: Split the text based on possible headings
-    # We use | (OR) to look for different heading variations. 
-    # \b ensures we match the whole word
-    split_pattern = r'\b(?:HINTS AND SOLUTIONS|ANSWERS|SOLUTIONS)\b'
-    sections = re.split(split_pattern, full_text, flags=re.IGNORECASE)
+    # This is our specific instruction to the AI
+    prompt = f"""
+    You are an expert data extraction assistant. I will provide you with the raw text from an exam paper. 
+    It contains questions in the first half and a "Hints and Solutions" section at the end.
     
-    # If the document doesn't have any of these headings, return an error message
-    if len(sections) < 2:
-        return [{"question": "Format Error", "solution": "Could not find an Answers/Solutions section in this PDF."}]
-        
-    # We join all sections EXCEPT the last one as the questions. 
-    questions_half = "".join(sections[:-1])
-    # The very last section is guaranteed to be our actual solutions block
-    solutions_half = sections[-1]
+    Your task:
+    1. Match every question with its exact corresponding solution.
+    2. Fix any sentences that might be jumbled due to PDF column formatting.
+    3. Return the output STRICTLY as a valid JSON array of objects. 
     
-    # Step 2: Loop through numbers dynamically
-    i = 1
-    while True: 
-        next_i = i + 1
+    The JSON must look exactly like this format:
+    [
+      {{"question": "What is the capital of France?", "solution": "Paris."}},
+      {{"question": "Solve for x: 2x = 4", "solution": "x = 2."}}
+    ]
+    
+    Do not include any markdown formatting like ```json or any other conversational text in your response. Just return the raw JSON array.
+    
+    RAW EXAM PAPER TEXT:
+    {full_text}
+    """
+    
+    try:
+        # Send the prompt to the AI
+        response = model.generate_content(prompt)
         
-        # --- Extract the Question ---
-        q_pattern_current = r'\b' + str(i) + r'\.'
-        q_pattern_next = r'\b' + str(next_i) + r'\.'
+        # Read the AI's response and convert it from text into a Python list
+        json_string = response.text.strip()
         
-        q_match_current = re.search(q_pattern_current, questions_half)
-        
-        # If we can't find question 'i', we reached the end of the test!
-        if not q_match_current:
-            break 
+        # Sometimes the AI ignores rules and adds markdown anyway, so we clean it just in case
+        if json_string.startswith("```json"):
+            json_string = json_string[7:-3].strip()
             
-        q_match_next = re.search(q_pattern_next, questions_half)
+        extracted_data = json.loads(json_string)
+        return extracted_data
         
-        # Cut the text for this specific question
-        start_q = q_match_current.start()
-        end_q = q_match_next.start() if q_match_next else len(questions_half)
-        question_text = questions_half[start_q:end_q].strip()
-        
-        # --- Extract the Solution ---
-        # Solutions might start with "1." or "1(" or "1 (" so we check for variations
-        s_pattern_current = r'\b' + str(i) + r'\s*(?:\.|\()'
-        s_pattern_next = r'\b' + str(next_i) + r'\s*(?:\.|\()'
-        
-        s_match_current = re.search(s_pattern_current, solutions_half)
-        s_match_next = re.search(s_pattern_next, solutions_half)
-        
-        if s_match_current:
-            start_s = s_match_current.start()
-            end_s = s_match_next.start() if s_match_next else len(solutions_half)
-            solution_text = solutions_half[start_s:end_s].strip()
-        else:
-            solution_text = "Solution not found for this question."
-            
-        # Step 3: Add the matched pair to our list
-        extracted_data.append({
-            "question": question_text,
-            "solution": solution_text
-        })
-        
-        # Increase our counter by 1 to check the next question
-        i += 1
-        
-    return extracted_data
+    except Exception as e:
+        return [{"question": "AI Processing Error", "solution": f"The AI encountered an error: {e}"}]
 
 
 # --- WEB APP INTERFACE ---
 
-# 1. Set the title of the web page
-st.title("📄 PDF Question & Solution Extractor")
-st.write("Upload a PDF document below to automatically extract questions and answers.")
+st.title("🤖 AI-Powered PDF Extractor")
+st.write("Upload a PDF document. Our AI will read the text, fix any column issues, and perfectly match your questions and answers!")
 
-# 2. Create a file uploader widget
 uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
 
-# 3. Process the file if the user has uploaded one
 if uploaded_file is not None:
-    st.info("Processing your PDF... please wait.")
+    st.info("Reading PDF and sending to AI... this usually takes 5-10 seconds.")
     
-    full_text = ""
     try:
-        # Read the uploaded PDF file
+        # 1. Read the PDF text (we can use basic extraction now, because the AI is smart enough to fix the column jumble!)
+        full_text = ""
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    full_text += text + "\n"
+                extracted = page.extract_text()
+                if extracted:
+                    full_text += extracted + "\n"
                     
-        # Run our extraction function
-        results = extract_qa_from_text(full_text)
+        # 2. Pass the text to our AI function
+        results = extract_qa_with_ai(full_text)
         
-        # 4. Display the results on the web page
-        if results and results[0]["question"] != "Format Error":
-            st.success(f"Successfully extracted {len(results)} questions!")
+        # 3. Display the results
+        if results and results[0]["question"] != "AI Processing Error":
+            st.success(f"AI successfully extracted {len(results)} items!")
             
-            # Loop through results and display them nicely
             for i, item in enumerate(results, 1):
-                st.subheader(f"Question {i}")
+                st.subheader(f"Item {i}")
                 st.write(item["question"])
                 
-                # Make the solution stand out
                 st.markdown("**Solution:**")
                 st.info(item["solution"]) 
                 
-                st.divider() # Adds a nice horizontal line between items
+                st.divider() 
                 
-        elif results and results[0]["question"] == "Format Error":
-            st.error(results[0]["solution"])
         else:
-            st.warning("Could not find any questions matching the expected format.")
+            st.error(results[0]["solution"])
             
     except Exception as e:
         st.error(f"An error occurred while reading the PDF: {e}")
